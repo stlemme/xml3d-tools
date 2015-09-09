@@ -153,8 +153,8 @@
     //---------- End public API ----------------
 
 
-    XML3D.StandardCamera.prototype.__defineGetter__("width", function() { return this.xml3d.clientWidth;});
-    XML3D.StandardCamera.prototype.__defineGetter__("height", function() { return this.xml3d.clientHeight;});
+    XML3D.StandardCamera.prototype.__defineGetter__("width", function() { return this.xml3d.clientWidth; });
+    XML3D.StandardCamera.prototype.__defineGetter__("height", function() { return this.xml3d.clientHeight; });
 
     XML3D.StandardCamera.prototype.getXML3DForElement = function(element) {
         var node = element.parentNode;
@@ -213,6 +213,18 @@
 	XML3D.StandardCamera.prototype.PANNING = "panning";
 	XML3D.StandardCamera.prototype.ORBIT = "orbit";
 
+    XML3D.StandardCamera.prototype.intersectScene = function(pos, dir) {
+		if (this.useRaycasting) {
+			var ray = new XML3D.Ray().setFromOriginDirection(pos, dir);
+			var hitpoint = new XML3D.Vec3();
+			this.xml3d.getElementByRay(ray, hitpoint);
+			if (!isNaN(XML3D.math.vec3.sqrLen(hitpoint.data)))
+				return hitpoint;
+		}
+		
+		return intersect_xz_plane(dir, pos);
+	}
+
     XML3D.StandardCamera.prototype.mousePressEvent = function(event) {
         var ev = event || window.event;
 
@@ -220,9 +232,13 @@
             case 0:
                 if (this.mode == "examine")
                     this.action = this.ROTATE;
-				else if (this.mode == "panning")
+				
+				else if (this.mode == "panning") {
 					this.action = this.PANNING;
-                else
+					var dir = this.getDirectionThroughPixel(ev.pageX, ev.pageY);
+					this.dragPoint = this.intersectScene(this.transformInterface.position, dir);
+
+				} else
                     this.action = this.LOOKAROUND;
                 break;
             case 1:
@@ -234,20 +250,9 @@
             case 2:
 				if (this.mode == "panning") {
 					this.action = this.ORBIT;
-					
-					if (this.useRaycasting) {
-						var new_vector = this.getDirectionThroughPixel(ev.pageX, ev.pageY);
-						var new_ray = new XML3D.Ray().setFromOriginDirection(this.transformInterface.position, new_vector);
-						var new_hitpoint = new XML3D.Vec3();
-						var new_hitnormal = new XML3D.Vec3();
-						this.xml3d.getElementByRay(new_ray, new_hitpoint, new_hitnormal);
-						if (!isNaN(new_hitpoint.x))
-							this.rotationCenter = new_hitpoint;
-					} else {
-						var new_vector = this.getDirectionThroughPixel(ev.pageX, ev.pageY);
-						this.rotationCenter = intersect_xz_plane(new_vector, this.transformInterface.position);
-					}
-					
+					var dir = this.getDirectionThroughPixel(ev.pageX, ev.pageY);
+					this.rotationCenter = this.intersectScene(this.transformInterface.position, dir);
+
 				} else {
 					this.action = this.DOLLY;
 				}
@@ -318,84 +323,59 @@
                 break;
 				
 			case(this.PANNING): //new code to handle panning update
-				var pos = this.transformInterface.position;
-				
-				var new_vector = this.getDirectionThroughPixel(ev.pageX, ev.pageY);
-				var old_vector = this.getDirectionThroughPixel(this.prevPos.x, this.prevPos.y);
-				var old_intersection, new_intersection;
-				
-				if (this.useRaycasting) {
-					
-					var old_ray = new XML3D.Ray().setFromOriginDirection(pos, old_vector);
-					var old_hitpoint = new XML3D.Vec3();
-					var old_hitnormal = new XML3D.Vec3();
-					this.xml3d.getElementByRay(old_ray, old_hitpoint, old_hitnormal);
-					
-					if (!(old_hitpoint === undefined)) {
-						//intersect_ray_plane and old_hitpoint are slightly different, creating weird bugs when using old_hitpoint as old_intersection
-						old_intersection = intersect_ray_plane(old_vector, pos, XML3D.Vec3.fromValues(0.0, 1.0, 0.0), old_hitpoint);
-						new_intersection = intersect_ray_plane(new_vector, pos, XML3D.Vec3.fromValues(0.0, 1.0, 0.0), old_hitpoint);
-					}
-					
-				} else {
-					
-					//calculate intersections of old and new ray with xz plane
-					old_intersection = intersect_xz_plane(old_vector, pos);
-					new_intersection = intersect_xz_plane(new_vector, pos);
-					
-				}
+				if (!this.dragPoint) break;
 
-				//calculate difference vector and adjust camera position
-				if (!(old_intersection === undefined || new_intersection === undefined)) {
-					// can i project both vectors on the plane with positive t?
-					var diff = old_intersection.subtract(new_intersection);
-					if (!isNaN(XML3D.math.vec3.sqrLen(diff.data)))
-						this.translate(diff);
-				}
+				var ray = this.getDirectionThroughPixel(ev.pageX, ev.pageY);
+				var hitpoint = intersect_ray_plane(ray, this.transformInterface.position, XML3D.Vec3.fromValues(0.0, 1.0, 0.0), this.dragPoint);
+				//var hitpoint = intersect_ray_plane(ray, this.transformInterface.position, this.transformInterface.direction, this.dragPoint);
+				if (!hitpoint) break;
+				
+				var diff = this.dragPoint.subtract(hitpoint);
+				if (isNaN(XML3D.math.vec3.sqrLen(diff.data))) break;
+				
+				this.transformInterface.translate(diff);
 				break;
 			
 			case(this.ORBIT): //new code to handle panning update
 				
-				if (this.rotationCenter !== undefined) {
+				if (!this.rotationCenter) break;
 					
-					var tf = this.transformInterface;
+				var tf = this.transformInterface;
+			
+				var dx = -this.rotateSpeed * (ev.pageX - this.prevPos.x) * 2.0 * Math.PI / this.width;
+				var dy = -this.rotateSpeed * (ev.pageY - this.prevPos.y) * 2.0 * Math.PI / this.height;
+
+				var mx = new XML3D.Quat.fromAxisAngle(new XML3D.Vec3.fromValues(0,1,0), dx);
+				var my = new XML3D.Quat.fromAxisAngle(new XML3D.Vec3.fromValues(1,0,0).transformQuat(mx.multiply(tf.orientation)), dy);
 				
-					var dx = -this.rotateSpeed * (ev.pageX - this.prevPos.x) * 2.0 * Math.PI / this.width;
-					var dy = -this.rotateSpeed * (ev.pageY - this.prevPos.y) * 2.0 * Math.PI / this.height;
+				var q0 = my.multiply(mx);
 
-					var mx = new XML3D.Quat.fromAxisAngle(new XML3D.Vec3.fromValues(0,1,0), dx);
-					var my = new XML3D.Quat.fromAxisAngle(new XML3D.Vec3.fromValues(1,0,0).transformQuat(mx.multiply(tf.orientation)), dy);
+				var tmp = q0.multiply(tf.orientation);
+				tmp.normalize();
+				var rotated_dir = new XML3D.Vec3.fromValues(0,0,1).transformQuat(tmp);
+				
+				if (rotated_dir.y > 0.05 && rotated_dir.y < 0.95) {
 					
-					var q0 = my.multiply(mx);
-
-					var p0 = this.rotationCenter;
-					var tmp = q0.multiply(tf.orientation);
-					tmp.normalize();
-					var rotated_dir = new XML3D.Vec3.fromValues(0,0,1).transformQuat(tmp);
-					
-					if (rotated_dir.y > 0.05 && rotated_dir.y < 0.95) {
-						
-						var diff = tf.position.subtract(this.rotationCenter);
-						var rotated = diff.transformQuat(q0);
-						if (p0.add(rotated).y > 5) {
-							tf.orientation = tmp;
-							tf.position = p0.add(rotated);
-						} else {
-							rotated = diff.transformQuat(mx);
-							tf.orientation = mx.multiply(tf.orientation);
-							tf.position = p0.add(rotated);
-						}
-						
+					var diff = tf.position.subtract(this.rotationCenter);
+					var rotated = diff.transformQuat(q0);
+					if (this.rotationCenter.add(rotated).y > 5) {
+						tf.orientation = tmp;
+						tf.position = this.rotationCenter.add(rotated);
 					} else {
-						
-						var diff = tf.position.subtract(this.rotationCenter);
-						var rotated = diff.transformQuat(mx);
+						rotated = diff.transformQuat(mx);
 						tf.orientation = mx.multiply(tf.orientation);
-						tf.position = p0.add(rotated);
-					
+						tf.position = this.rotationCenter.add(rotated);
 					}
 					
+				} else {
+					
+					var diff = tf.position.subtract(this.rotationCenter);
+					var rotated = diff.transformQuat(mx);
+					tf.orientation = mx.multiply(tf.orientation);
+					tf.position = this.rotationCenter.add(rotated);
+				
 				}
+				
 				break;
         }
 
