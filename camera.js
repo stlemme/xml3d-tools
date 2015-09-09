@@ -30,11 +30,13 @@
         this.element = element;
         this.xml3d = this.getXML3DForElement(element);
 
-        this.mode = opt.mode || "examine";
+        var mode = opt.mode || "examine";
+		this.mode = this.MODES[mode];
+		
         this.touchTranslateMode = opt.touchTranslateMode || "twofinger";
         //Note: The examine point is relative to the element's parent coordinate space.
         this.examinePoint = opt.examinePoint || this.getInverseTranslationOfParent(element);
-        this.rotateSpeed = opt.rotateSpeed || 3;
+        this.rotateSpeed = opt.rotateSpeed || 1.5;
         this.zoomSpeed = opt.zoomSpeed || 20;
         this.useKeys = opt.useKeys !== undefined ? opt.useKeys : false;
         this.useRaycasting = opt.useRaycasting !== undefined ? opt.useRaycasting : true;
@@ -49,6 +51,9 @@
         };
         this.prevZoomVectorLength = null;
         this.upVector = this.transformInterface.upVector;
+		
+        this.action = this.NO_ACTION;
+		this.state = {};
 
         this.attach();
     };
@@ -204,15 +209,118 @@
 		//calculate ray directions through camera
 		return this.getRayDirection(x_span, y_span);
 	}
+	
+	
+    XML3D.StandardCamera.prototype.NO_ACTION = null;
+	
+    XML3D.StandardCamera.prototype.TRANSLATE = {
+		move: function (x, y, dx, dy) {
+			var f = 2.0* Math.tan(this.transformInterface.fieldOfView/2.0) / this.height;
+			dx = f*dx * this.zoomSpeed;
+			dy = f*dy * this.zoomSpeed;
+			var trans = XML3D.Vec3.fromValues(-dx, dy, 0.0);
+			this.transformInterface.translate(this.transformInterface.inverseTransformOf(trans));
+		}
+	};
+	
+    XML3D.StandardCamera.prototype.DOLLY = {
+		move: function (x, y, dx, dy) {
+			dy = this.zoomSpeed * dy / this.height;
+			this.transformInterface.translate(this.transformInterface.inverseTransformOf(XML3D.Vec3.fromValues(0, 0, dy)));
+		}
+	};
+	
+    XML3D.StandardCamera.prototype.ROTATE = {
+		move: function (x, y, dx, dy) {
+			dx = -this.rotateSpeed * dx * 2.0 * Math.PI / this.width;
+			dy = -this.rotateSpeed * dy * 2.0 * Math.PI / this.height;
 
-    XML3D.StandardCamera.prototype.NO_MOUSE_ACTION = "no_action";
-    XML3D.StandardCamera.prototype.TRANSLATE = "translate";
-    XML3D.StandardCamera.prototype.DOLLY = "dolly";
-    XML3D.StandardCamera.prototype.ROTATE = "rotate";
-    XML3D.StandardCamera.prototype.LOOKAROUND = "lookaround";
-	XML3D.StandardCamera.prototype.PANNING = "panning";
-	XML3D.StandardCamera.prototype.ORBIT = "orbit";
+			var mx = XML3D.Quat.fromAxisAngle([0,1,0], dx);
+			var my = XML3D.Quat.fromAxisAngle([1,0,0], dy);
+			mx = mx.mul(my);
+			this.transformInterface.rotateAroundPoint(mx, this.examinePoint);
+		}
+	};
+	
+    XML3D.StandardCamera.prototype.LOOKAROUND = {
+		move: function (x, y, dx, dy) {
+			dx = -this.rotateSpeed * dx * 2.0 * Math.PI / this.width;
+			dy = this.rotateSpeed * dy * 2.0 * Math.PI / this.height;
+			var cross = this.upVector.cross(this.transformInterface.direction);
 
+			var mx = XML3D.Quat.fromAxisAngle(this.upVector, dx);
+			var my = XML3D.Quat.fromAxisAngle(cross, dy);
+
+			this.transformInterface.lookAround(mx, my, this.upVector);
+		}
+	};
+	
+	XML3D.StandardCamera.prototype.PANNING = {
+		start: function (x, y) {
+			var dir = this.getDirectionThroughPixel(x, y);
+			this.state.dragPoint = this.intersectScene(this.transformInterface.position, dir);
+		},
+		move: function (x, y, dx, dy) {
+			if (!this.state.dragPoint) return;
+			
+			var ray = this.getDirectionThroughPixel(x, y);
+			var hitpoint = this.intersect_ray_plane(ray, this.transformInterface.position, XML3D.Vec3.fromValues(0.0, 1.0, 0.0), this.state.dragPoint);
+			if (!hitpoint) return;
+			
+			var diff = this.state.dragPoint.subtract(hitpoint);
+			if (isNaN(XML3D.math.vec3.sqrLen(diff.data))) return;
+			
+			this.transformInterface.translate(diff);
+		}
+	};
+	
+	XML3D.StandardCamera.prototype.ORBIT = {
+		start: function (x, y) {
+			var dir = this.getDirectionThroughPixel(x, y);
+			this.state.rotationCenter = this.intersectScene(this.transformInterface.position, dir);
+		},
+		move: function (x, y, dx, dy) {
+			if (!this.state.rotationCenter) return;
+			
+			var tf = this.transformInterface;
+			
+			dx = -this.rotateSpeed * dx * 2.0 * Math.PI / this.width;
+			dy = -this.rotateSpeed * dy * 2.0 * Math.PI / this.height;
+			
+			var mx = new XML3D.Quat.fromAxisAngle([0,1,0], dx);
+			var my = new XML3D.Quat.fromAxisAngle(new XML3D.Vec3.fromValues(1,0,0).transformQuat(mx.multiply(tf.orientation)), dy);
+			
+			var q0 = my.multiply(mx);
+			
+			var tmp = q0.multiply(tf.orientation);
+			tmp.normalize();
+			var rotated_dir = new XML3D.Vec3.fromValues(0,0,1).transformQuat(tmp);
+			
+			if (rotated_dir.y > 0.05 && rotated_dir.y < 0.95) {
+				
+				var diff = tf.position.subtract(this.state.rotationCenter);
+				var rotated = diff.transformQuat(q0);
+				if (this.state.rotationCenter.add(rotated).y > 5) {
+					tf.orientation = tmp;
+					tf.position = this.state.rotationCenter.add(rotated);
+				} else {
+					rotated = diff.transformQuat(mx);
+					tf.orientation = mx.multiply(tf.orientation);
+					tf.position = this.state.rotationCenter.add(rotated);
+				}
+				
+			} else {
+				
+				var diff = tf.position.subtract(this.state.rotationCenter);
+				var rotated = diff.transformQuat(mx);
+				tf.orientation = mx.multiply(tf.orientation);
+				tf.position = this.state.rotationCenter.add(rotated);
+				
+			}
+		}
+	};
+	
+	
     XML3D.StandardCamera.prototype.intersectScene = function(pos, dir) {
 		if (this.useRaycasting) {
 			var ray = new XML3D.Ray().setFromOriginDirection(pos, dir);
@@ -222,189 +330,118 @@
 				return hitpoint;
 		}
 		
-		return intersect_xz_plane(dir, pos);
+		return this.intersect_xz_plane(dir, pos);
 	}
-
+	
+	XML3D.StandardCamera.prototype.MODES = {};
+	
+	XML3D.StandardCamera.prototype.MODES.examine = {
+		mouse: [
+			XML3D.StandardCamera.prototype.ROTATE,
+			XML3D.StandardCamera.prototype.TRANSLATE,
+			XML3D.StandardCamera.prototype.DOLLY
+		],
+		touch: [
+			XML3D.StandardCamera.prototype.NO_ACTION, // XML3D.StandardCamera.prototype.ROTATE,
+			XML3D.StandardCamera.prototype.NO_ACTION, // XML3D.StandardCamera.prototype.DOLLY,
+			XML3D.StandardCamera.prototype.NO_ACTION // XML3D.StandardCamera.prototype.TRANSLATE
+		]
+	};
+	
+	XML3D.StandardCamera.prototype.MODES.panning = {
+		mouse: [
+			XML3D.StandardCamera.prototype.PANNING,
+			XML3D.StandardCamera.prototype.DOLLY,
+			XML3D.StandardCamera.prototype.ORBIT
+		],
+		touch: [
+			XML3D.StandardCamera.prototype.PANNING,
+			XML3D.StandardCamera.prototype.NO_ACTION, // XML3D.StandardCamera.prototype.ORBIT,
+			XML3D.StandardCamera.prototype.NO_ACTION // XML3D.StandardCamera.prototype.DOLLY
+		]
+	};
+	
+	XML3D.StandardCamera.prototype.MODES.lookaround = {
+		mouse: [
+			XML3D.StandardCamera.prototype.LOOKAROUND,
+			XML3D.StandardCamera.prototype.TRANSLATE,
+			XML3D.StandardCamera.prototype.DOLLY
+		],
+		touch: [
+			XML3D.StandardCamera.prototype.NO_ACTION, // XML3D.StandardCamera.prototype.LOOKAROUND,
+			XML3D.StandardCamera.prototype.NO_ACTION, // XML3D.StandardCamera.prototype.DOLLY,
+			XML3D.StandardCamera.prototype.NO_ACTION // XML3D.StandardCamera.prototype.TRANSLATE
+		]
+	};
+	
     XML3D.StandardCamera.prototype.mousePressEvent = function(event) {
         var ev = event || window.event;
-
-        switch (ev.button) {
-            case 0:
-                if (this.mode == "examine")
-                    this.action = this.ROTATE;
-				
-				else if (this.mode == "panning") {
-					this.action = this.PANNING;
-					var dir = this.getDirectionThroughPixel(ev.pageX, ev.pageY);
-					this.dragPoint = this.intersectScene(this.transformInterface.position, dir);
-
-				} else
-                    this.action = this.LOOKAROUND;
-                break;
-            case 1:
-				if (this.mode == "panning")
-					this.action = this.DOLLY
-				else
-					this.action = this.TRANSLATE;
-                break;
-            case 2:
-				if (this.mode == "panning") {
-					this.action = this.ORBIT;
-					var dir = this.getDirectionThroughPixel(ev.pageX, ev.pageY);
-					this.rotationCenter = this.intersectScene(this.transformInterface.position, dir);
-
-				} else {
-					this.action = this.DOLLY;
-				}
-                break;
-            default:
-                this.action = this.NO_MOUSE_ACTION;
-        }
-
+		
+		this.action = this.mode.mouse[ev.button];
+		
+		var start = this.action.start;
+		if (start) start.call(this, ev.pageX, ev.pageY);
+		
         this.prevPos.x = ev.pageX;
         this.prevPos.y = ev.pageY;
-
-        if (this.action !== this.NO_MOUSE_ACTION) {
+		
+        if (this.action !== this.NO_ACTION) {
             //Disable object picking during camera actions
             this.mousemovePicking = XML3D.options.getValue("renderer-mousemove-picking");
             XML3D.options.setValue("renderer-mousemove-picking", false);
         }
-
+		
         this.stopEvent(event);
         return false;
     };
-
-    XML3D.StandardCamera.prototype.mouseReleaseEvent = function(event) {
-        this.stopEvent(event);
-
-        if (this.action !== this.NO_MOUSE_ACTION) {
-            XML3D.options.setValue("renderer-mousemove-picking", this.mousemovePicking);
-        }
-
-        this.action = this.NO_MOUSE_ACTION;
-        return false;
-    };
-
-    XML3D.StandardCamera.prototype.mouseMoveEvent = function(event, camera) {
+	
+    XML3D.StandardCamera.prototype.mouseReleaseEvent = function (event) {
         var ev = event || window.event;
-        if (!this.action)
-            return;
-        var dx, dy, mx, my;
-        switch(this.action) {
-            case(this.TRANSLATE):
-                var f = 2.0* Math.tan(this.transformInterface.fieldOfView/2.0) / this.height;
-                dx = f*(ev.pageX - this.prevPos.x) * this.zoomSpeed;
-                dy = f*(ev.pageY - this.prevPos.y) * this.zoomSpeed;
-                var trans = XML3D.Vec3.fromValues(-dx, dy, 0.0);
-                this.transformInterface.translate(this.transformInterface.inverseTransformOf(trans));
-                break;
-            case(this.DOLLY):
-                dy = this.zoomSpeed * (ev.pageY - this.prevPos.y) / this.height;
-                this.transformInterface.translate(this.transformInterface.inverseTransformOf(XML3D.Vec3.fromValues(0, 0, dy)));
-                break;
-            case(this.ROTATE):
-                dx = -this.rotateSpeed*0.1 * (ev.pageX - this.prevPos.x) * 2.0 * Math.PI / this.width;
-                dy = -this.rotateSpeed*0.1 * (ev.pageY - this.prevPos.y) * 2.0 * Math.PI / this.height;
-
-                mx = XML3D.Quat.fromAxisAngle([0,1,0], dx);
-                my = XML3D.Quat.fromAxisAngle([1,0,0], dy);
-                mx = mx.mul(my);
-                this.transformInterface.rotateAroundPoint(mx, this.examinePoint);
-                break;
-            case(this.LOOKAROUND):
-                dx = -this.rotateSpeed*0.1 * (ev.pageX - this.prevPos.x) * 2.0 * Math.PI / this.width;
-                dy = this.rotateSpeed*0.1 * (ev.pageY - this.prevPos.y) * 2.0 * Math.PI / this.height;
-                var cross = this.upVector.cross(this.transformInterface.direction);
-
-                mx = XML3D.Quat.fromAxisAngle( this.upVector , dx);
-                my = XML3D.Quat.fromAxisAngle( cross , dy);
-
-                this.transformInterface.lookAround(mx, my, this.upVector);
-                break;
-				
-			case(this.PANNING): //new code to handle panning update
-				if (!this.dragPoint) break;
-
-				var ray = this.getDirectionThroughPixel(ev.pageX, ev.pageY);
-				var hitpoint = intersect_ray_plane(ray, this.transformInterface.position, XML3D.Vec3.fromValues(0.0, 1.0, 0.0), this.dragPoint);
-				//var hitpoint = intersect_ray_plane(ray, this.transformInterface.position, this.transformInterface.direction, this.dragPoint);
-				if (!hitpoint) break;
-				
-				var diff = this.dragPoint.subtract(hitpoint);
-				if (isNaN(XML3D.math.vec3.sqrLen(diff.data))) break;
-				
-				this.transformInterface.translate(diff);
-				break;
-			
-			case(this.ORBIT): //new code to handle panning update
-				
-				if (!this.rotationCenter) break;
-					
-				var tf = this.transformInterface;
-			
-				var dx = -this.rotateSpeed * (ev.pageX - this.prevPos.x) * 2.0 * Math.PI / this.width;
-				var dy = -this.rotateSpeed * (ev.pageY - this.prevPos.y) * 2.0 * Math.PI / this.height;
-
-				var mx = new XML3D.Quat.fromAxisAngle(new XML3D.Vec3.fromValues(0,1,0), dx);
-				var my = new XML3D.Quat.fromAxisAngle(new XML3D.Vec3.fromValues(1,0,0).transformQuat(mx.multiply(tf.orientation)), dy);
-				
-				var q0 = my.multiply(mx);
-
-				var tmp = q0.multiply(tf.orientation);
-				tmp.normalize();
-				var rotated_dir = new XML3D.Vec3.fromValues(0,0,1).transformQuat(tmp);
-				
-				if (rotated_dir.y > 0.05 && rotated_dir.y < 0.95) {
-					
-					var diff = tf.position.subtract(this.rotationCenter);
-					var rotated = diff.transformQuat(q0);
-					if (this.rotationCenter.add(rotated).y > 5) {
-						tf.orientation = tmp;
-						tf.position = this.rotationCenter.add(rotated);
-					} else {
-						rotated = diff.transformQuat(mx);
-						tf.orientation = mx.multiply(tf.orientation);
-						tf.position = this.rotationCenter.add(rotated);
-					}
-					
-				} else {
-					
-					var diff = tf.position.subtract(this.rotationCenter);
-					var rotated = diff.transformQuat(mx);
-					tf.orientation = mx.multiply(tf.orientation);
-					tf.position = this.rotationCenter.add(rotated);
-				
-				}
-				
-				break;
-        }
-
-        if (this.action != this.NO_MOUSE_ACTION)
-        {
-            this.prevPos.x = ev.pageX;
-            this.prevPos.y = ev.pageY;
-            event.returnValue = false;
-        }
+		
+        if (this.action !== this.NO_ACTION)
+            XML3D.options.setValue("renderer-mousemove-picking", this.mousemovePicking);
+		
+		var end = this.action.end;
+		if (end) end.call(this, ev.pageX, ev.pageY);
+		
+        this.action = this.NO_ACTION;
+		
         this.stopEvent(event);
         return false;
     };
-
-	function intersect_xz_plane(vector, origin) {
+	
+    XML3D.StandardCamera.prototype.mouseMoveEvent = function (event, camera) {
+        var ev = event || window.event;
+        if (!this.action) return;
+		
+        var dx = ev.pageX - this.prevPos.x;
+		var dy = ev.pageY - this.prevPos.y;
+		
+		var move = this.action.move;
+		if (move) move.call(this, ev.pageX, ev.pageY, dx, dy);
+		
+        this.prevPos.x = ev.pageX;
+        this.prevPos.y = ev.pageY;
+		
+        this.stopEvent(event);
+        return false;
+    };
+	
+	XML3D.StandardCamera.prototype.intersect_xz_plane = function (vector, origin) {
 		//specialized code for xz_plane is faster than code for general plane!
 		//alternatively usable:
 		//return intersect_ray_plane(vector, origin, new window.XML3DVec3(0,1,0), new window.XML3DVec3(0,0,0));
 		if (vector.y == 0 && origin.y == 0)
 			return origin;
-
+		
 		if (vector.y >= 0 || origin.y <= 0) 
 			return;
 		
 		var t = -(origin.y / vector.y);
-		var projected = origin.add(vector.scale(t));
-		return projected;
+		return origin.add(vector.scale(t));
 	}
-
-	function intersect_ray_plane(ray_direction, ray_origin, plane_normal, plane_origin) {
+	
+	XML3D.StandardCamera.prototype.intersect_ray_plane = function (ray_direction, ray_origin, plane_normal, plane_origin) {
 		var divisor = ray_direction.dot(plane_normal);
 		var factor = (plane_origin.subtract(ray_origin)).dot(plane_normal);
 		if (divisor == 0) {
@@ -414,264 +451,233 @@
 		}
 		
 		var d = factor / divisor;
-		if (d < 0)
-			return;
+		if (d < 0) return;
 		
-		var point = ray_origin.add(ray_direction.scale(d));
-		return point;
+		return ray_origin.add(ray_direction.scale(d));
 	}
 	
-
+	
     // -----------------------------------------------------
     // touch rotation and movement
     // -----------------------------------------------------
-
+	
     XML3D.StandardCamera.prototype.touchStartEvent = function(event) {
-        if (event.target.nodeName.toLowerCase() == "xml3d") {
+        if (event.target.nodeName.toLowerCase() == "xml3d")
             this.stopEvent(event);
-        }
-
+		
         var ev = event || window.event;
-        switch (ev.touches.length) {
-            case 1:
-                if (this.mode == "examine")
-                    this.action = this.ROTATE;
-				else if (this.mode == "panning")
-					this.action = this.PANNING;
-                else
-                    this.action = this.LOOKAROUND;
-                break;
-            case 2:
-				if (this.mode == "panning")
-					this.action = this.ORBIT;
-				else
-					this.action = this.DOLLY;
-                break;
-            case 3:
-				if (this.mode == "panning")
-					this.action = this.DOLLY;
-				else
-					this.action = this.TRANSLATE;
-                break;
-            default:
-                this.action = this.NO_MOUSE_ACTION;
-        }
-
+		
+		this.action = this.mode.touch[ev.touches.length-1];
+		if (!this.action) {
+			this.action = this.NO_ACTION;
+			return false;
+		}
+		
         var touchPositions = [];
-        for (var i=0; i<ev.touches.length; i++) {
-                touchPositions[i] = {x: ev.touches[i].pageX, y: ev.touches[i].pageY};
-        }
-        this.prevTouchPositions = touchPositions;
+        for (var i = 0; i < ev.touches.length; i++)
+            touchPositions[i] = {x: ev.touches[i].pageX, y: ev.touches[i].pageY};
 
+		var start = this.action.start;
+		if (start) start.call(this, touchPositions[0].x, touchPositions[0].y);
+		
+        this.prevTouchPositions = touchPositions;
+		
         return false;
     };
-
+	
     XML3D.StandardCamera.prototype.touchEndEvent = function(event) {
-        if (event.target.nodeName.toLowerCase() == "xml3d") {
+        if (event.target.nodeName.toLowerCase() == "xml3d")
             this.stopEvent(event);
-        }
-
+		
         var ev = event || window.event;
-        switch (ev.touches.length) {
-            case 1:
-                this.prevZoomVectorLength = null;
-                if (this.mode == "examine")
-                    this.action = this.ROTATE;
-				else if (this.mode == "panning")
-					this.action = this.PANNING;
-                else
-                    this.action = this.LOOKAROUND;
-                break;
-            case 2:
-				if(this.mode == "panning")
-					this.action = this.ORBIT;
-				else
-					this.action = this.DOLLY;
-                break;
-            case 3:
-				if (this.mode == "panning")
-					this.action = this.DOLLY;
-				else
-					this.action = this.TRANSLATE;
-                break;
-            default:
-                this.action = this.NO_MOUSE_ACTION;
-        }
-
+		
+		if (!this.action)
+			return false;
+		
         var touchPositions = [];
-        for (var i=0; i<ev.touches.length; i++) {
-                touchPositions[i] = {x: ev.touches[i].pageX, y: ev.touches[i].pageY};
-        }
-        this.prevTouchPositions = touchPositions;
-
+        for (var i=0; i<ev.touches.length; i++)
+            touchPositions[i] = {x: ev.touches[i].pageX, y: ev.touches[i].pageY};
+		
+		var end = this.action.end;
+		if (end) end.call(this, touchPositions[0].x, touchPositions[0].y);
+        
+        this.action = this.NO_ACTION;
+		
         return false;
     };
-
+	
     XML3D.StandardCamera.prototype.touchMoveEvent = function(event, camera) {
-        if (event.target.nodeName.toLowerCase() == "xml3d") {
+        if (event.target.nodeName.toLowerCase() == "xml3d")
             this.stopEvent(event);
-        }
-
+		
         var ev = event || window.event;
         if (!this.action)
             return;
-        var f, dx, dy, dv, trans, mx, my;
-        switch(this.action) {
-            case(this.TRANSLATE):
-                if (this.touchTranslateMode == "threefinger") {
-                    f = 2.0* Math.tan(this.transformInterface.fieldOfView/2.0) / this.height;
-                    dx = f*(ev.touches[0].pageX - this.prevTouchPositions[0].x);
-                    dy = f*(ev.touches[0].pageY - this.prevTouchPositions[0].y);
-                    trans = XML3D.Vec3.fromValues(-dx*this.zoomSpeed, dy*this.zoomSpeed, 0.0);
-                    this.transformInterface.translate(this.transformInterface.inverseTransformOf(trans));
-                }
-                break;
-            case(this.DOLLY):
-                if (this.touchTranslateMode == "twofinger") {
-                    //apple-style 2-finger dolly + translate
-                    var prevMidpoint;
+		
+		var touchPositions = [];
+		for (var i = 0; i < ev.touches.length; i++)
+			touchPositions[i] = {x: ev.touches[i].pageX, y: ev.touches[i].pageY};
+		
+		var dx = touchPositions[0].x - this.prevTouchPositions[0].x;
+		var dy = touchPositions[0].y - this.prevTouchPositions[0].y;
+		
+		var move = this.action.move;
+		if (move) move.call(this, touchPositions[0].x, touchPositions[0].y, dx, dy);
+		
+        // var f, dx, dy, dv, trans, mx, my;
+        // switch(this.action) {
+            // case(this.TRANSLATE):
+                // if (this.touchTranslateMode == "threefinger") {
+                    // f = 2.0* Math.tan(this.transformInterface.fieldOfView/2.0) / this.height;
+                    // dx = f*(ev.touches[0].pageX - this.prevTouchPositions[0].x);
+                    // dy = f*(ev.touches[0].pageY - this.prevTouchPositions[0].y);
+                    // trans = XML3D.Vec3.fromValues(-dx*this.zoomSpeed, dy*this.zoomSpeed, 0.0);
+                    // this.transformInterface.translate(this.transformInterface.inverseTransformOf(trans));
+                // }
+                // break;
+            // case(this.DOLLY):
+                // if (this.touchTranslateMode == "twofinger") {
+                    // apple-style 2-finger dolly + translate
+                    // var prevMidpoint;
 
-                    if (this.prevTouchPositions.length > 1) {
-                        prevMidpoint = {x:(this.prevTouchPositions[0].x + this.prevTouchPositions[1].x) / 2 ,
-                                        y:(this.prevTouchPositions[0].y + this.prevTouchPositions[1].y) / 2 }
-                    }
+                    // if (this.prevTouchPositions.length > 1) {
+                        // prevMidpoint = {x:(this.prevTouchPositions[0].x + this.prevTouchPositions[1].x) / 2 ,
+                                        // y:(this.prevTouchPositions[0].y + this.prevTouchPositions[1].y) / 2 }
+                    // }
 
-                    if (prevMidpoint !== undefined) {
-                        var curMidpoint = {x:(ev.touches[0].pageX + ev.touches[1].pageX) / 2 ,
-                                           y:(ev.touches[0].pageY + ev.touches[1].pageY) / 2 };
-                        f = 2.0* Math.tan(this.transformInterface.fieldOfView/2.0) / this.height;
-                        dx = f*(curMidpoint.x - prevMidpoint.x);
-                        dy = f*(curMidpoint.y - prevMidpoint.y);
-                        trans = XML3D.Vec3.fromValues(-dx*this.zoomSpeed, dy*this.zoomSpeed, 0.0);
-                        this.transformInterface.translate(this.transformInterface.inverseTransformOf(trans));
-                    }
-                }
+                    // if (prevMidpoint !== undefined) {
+                        // var curMidpoint = {x:(ev.touches[0].pageX + ev.touches[1].pageX) / 2 ,
+                                           // y:(ev.touches[0].pageY + ev.touches[1].pageY) / 2 };
+                        // f = 2.0* Math.tan(this.transformInterface.fieldOfView/2.0) / this.height;
+                        // dx = f*(curMidpoint.x - prevMidpoint.x);
+                        // dy = f*(curMidpoint.y - prevMidpoint.y);
+                        // trans = XML3D.Vec3.fromValues(-dx*this.zoomSpeed, dy*this.zoomSpeed, 0.0);
+                        // this.transformInterface.translate(this.transformInterface.inverseTransformOf(trans));
+                    // }
+                // }
 
-                if (this.prevZoomVectorLength !== null) {
-                    dv = {x: ev.touches[0].pageX - ev.touches[1].pageX, y: ev.touches[0].pageY - ev.touches[1].pageY};
-                    var currLength = Math.sqrt(dv.x*dv.x + dv.y*dv.y);
+                // if (this.prevZoomVectorLength !== null) {
+                    // dv = {x: ev.touches[0].pageX - ev.touches[1].pageX, y: ev.touches[0].pageY - ev.touches[1].pageY};
+                    // var currLength = Math.sqrt(dv.x*dv.x + dv.y*dv.y);
 
-                    dy = this.zoomSpeed * (currLength - this.prevZoomVectorLength) / this.height;
-                    this.transformInterface.translate(this.transformInterface.inverseTransformOf(XML3D.Vec3.fromValues(0, 0, -dy)));
+                    // dy = this.zoomSpeed * (currLength - this.prevZoomVectorLength) / this.height;
+                    // this.transformInterface.translate(this.transformInterface.inverseTransformOf(XML3D.Vec3.fromValues(0, 0, -dy)));
 
-                    this.prevZoomVectorLength = currLength;
-                } else {
-                    dv = {x: ev.touches[0].pageX - ev.touches[1].pageX, y: ev.touches[0].pageY - ev.touches[1].pageY};
-                    this.prevZoomVectorLength = Math.sqrt(dv.x*dv.x + dv.y*dv.y);
-                }
+                    // this.prevZoomVectorLength = currLength;
+                // } else {
+                    // dv = {x: ev.touches[0].pageX - ev.touches[1].pageX, y: ev.touches[0].pageY - ev.touches[1].pageY};
+                    // this.prevZoomVectorLength = Math.sqrt(dv.x*dv.x + dv.y*dv.y);
+                // }
 
-                break;
-            case(this.ROTATE):
-                dx = -this.rotateSpeed*0.1 * (ev.touches[0].pageX - this.prevTouchPositions[0].x) * 2.0 * Math.PI / this.width;
-                dy = -this.rotateSpeed*0.1 * (ev.touches[0].pageY - this.prevTouchPositions[0].y) * 2.0 * Math.PI / this.height;
+                // break;
+            // case(this.ROTATE):
+                // dx = -this.rotateSpeed*0.1 * (ev.touches[0].pageX - this.prevTouchPositions[0].x) * 2.0 * Math.PI / this.width;
+                // dy = -this.rotateSpeed*0.1 * (ev.touches[0].pageY - this.prevTouchPositions[0].y) * 2.0 * Math.PI / this.height;
 
-                mx = XML3D.Quat.fromAxisAngle([0,1,0], dx);
-                my = XML3D.Quat.fromAxisAngle([1,0,0], dy);
-                mx = mx.mul(my);
-                this.transformInterface.rotateAroundPoint(mx, this.examinePoint);
-                break;
-            case(this.LOOKAROUND):
-                dx = -this.rotateSpeed*0.1 * (ev.touches[0].pageX - this.prevTouchPositions[0].x) * 2.0 * Math.PI / this.width;
-                dy = this.rotateSpeed*0.1 * (ev.touches[0].pageY - this.prevTouchPositions[0].y) * 2.0 * Math.PI / this.height;
-                var cross = this.upVector.cross(this.transformInterface.direction);
+                // mx = XML3D.Quat.fromAxisAngle([0,1,0], dx);
+                // my = XML3D.Quat.fromAxisAngle([1,0,0], dy);
+                // mx = mx.mul(my);
+                // this.transformInterface.rotateAroundPoint(mx, this.examinePoint);
+                // break;
+            // case(this.LOOKAROUND):
+                // dx = -this.rotateSpeed*0.1 * (ev.touches[0].pageX - this.prevTouchPositions[0].x) * 2.0 * Math.PI / this.width;
+                // dy = this.rotateSpeed*0.1 * (ev.touches[0].pageY - this.prevTouchPositions[0].y) * 2.0 * Math.PI / this.height;
+                // var cross = this.upVector.cross(this.transformInterface.direction);
 
-                mx = XML3D.Quat.fromAxisAngle( this.upVector , dx);
-                my = XML3D.Quat.fromAxisAngle( cross , dy);
+                // mx = XML3D.Quat.fromAxisAngle( this.upVector , dx);
+                // my = XML3D.Quat.fromAxisAngle( cross , dy);
 
-                this.transformInterface.lookAround(mx, my, this.upVector);
-                break;
+                // this.transformInterface.lookAround(mx, my, this.upVector);
+                // break;
 			
-			case(this.PANNING): //new code to handle panning update
-				var new_vector = this.getDirectionThroughPixel(ev.touches[0].pageX, ev.touches[0].pageY);
-				var old_vector = this.getDirectionThroughPixel(this.prevTouchPositions[0].x, this.prevTouchPositions[0].y);
+			// case(this.PANNING): //new code to handle panning update
+				// var new_vector = this.getDirectionThroughPixel(ev.touches[0].pageX, ev.touches[0].pageY);
+				// var old_vector = this.getDirectionThroughPixel(this.prevTouchPositions[0].x, this.prevTouchPositions[0].y);
 				
-				if (this.useRaycasting) {
-					var old_ray = new window.XML3DRay(this.camera.position, old_vector);
-					var old_hitpoint = new this.xml3d.createXML3DVec3();
-					var old_hitnormal = new this.xml3d.createXML3DVec3();
-					this.xml3d.getElementByRay(old_ray, old_hitpoint, old_hitnormal);
+				// if (this.useRaycasting) {
+					// var old_ray = new window.XML3DRay(this.camera.position, old_vector);
+					// var old_hitpoint = new this.xml3d.createXML3DVec3();
+					// var old_hitnormal = new this.xml3d.createXML3DVec3();
+					// this.xml3d.getElementByRay(old_ray, old_hitpoint, old_hitnormal);
 				
-					if (!(old_hitpoint === undefined)) {
-						//intersect_ray_plane and old_hitpoint are slightly different, creating weird bugs when using old_hitpoint as old_intersection
-						var old_intersection = intersect_ray_plane(old_vector, this.camera.position, new window.XML3DVec3(0.0,1.0,0.0), old_hitpoint);
-						var new_intersection = intersect_ray_plane(new_vector, this.camera.position, new window.XML3DVec3(0.0,1.0,0.0), old_hitpoint);
-					}
-				} else {
-					//calculate intersections of old and new ray with xz plane
-					var old_intersection = intersect_xz_plane(old_vector, this.camera.position);
-					var new_intersection = intersect_xz_plane(new_vector, this.camera.position);
-				}
+					// if (!(old_hitpoint === undefined)) {
+						// intersect_ray_plane and old_hitpoint are slightly different, creating weird bugs when using old_hitpoint as old_intersection
+						// var old_intersection = intersect_ray_plane(old_vector, this.camera.position, new window.XML3DVec3(0.0,1.0,0.0), old_hitpoint);
+						// var new_intersection = intersect_ray_plane(new_vector, this.camera.position, new window.XML3DVec3(0.0,1.0,0.0), old_hitpoint);
+					// }
+				// } else {
+					// calculate intersections of old and new ray with xz plane
+					// var old_intersection = intersect_xz_plane(old_vector, this.camera.position);
+					// var new_intersection = intersect_xz_plane(new_vector, this.camera.position);
+				// }
 			
-				//calculate difference vector and adjust camera position
-				if (!(old_intersection === undefined || new_intersection === undefined)) {
+				// calculate difference vector and adjust camera position
+				// if (!(old_intersection === undefined || new_intersection === undefined)) {
 					// can i project both vectors on the plane with positive t?
-					var difference = old_intersection.subtract(new_intersection);
-					if (difference.length() < 10000) {
-						this.camera.translate(difference);
-					}
-				}
-				break;
+					// var difference = old_intersection.subtract(new_intersection);
+					// if (difference.length() < 10000) {
+						// this.camera.translate(difference);
+					// }
+				// }
+				// break;
 			
-			case(this.ORBIT): //new code to handle orbit update, rotate around the first touch-point
-				var new_vector = this.getDirectionThroughPixel(ev.touches[0].pageX, ev.touches[0].pageY);
+			// case(this.ORBIT): //new code to handle orbit update, rotate around the first touch-point
+				// var new_vector = this.getDirectionThroughPixel(ev.touches[0].pageX, ev.touches[0].pageY);
 				
-				if (this.useRaycasting) {
-					var new_ray = new window.XML3DRay(this.camera.position, new_vector);
-					var new_hitpoint = new this.xml3d.createXML3DVec3();
-					var new_hitnormal = new this.xml3d.createXML3DVec3();
-					this.xml3d.getElementByRay(new_ray, new_hitpoint, new_hitnormal);
-					var new_intersection = new_hitpoint;
-				} else {
-					var new_intersection = intersect_xz_plane(new_vector, this.camera.position);
-				}
+				// if (this.useRaycasting) {
+					// var new_ray = new window.XML3DRay(this.camera.position, new_vector);
+					// var new_hitpoint = new this.xml3d.createXML3DVec3();
+					// var new_hitnormal = new this.xml3d.createXML3DVec3();
+					// this.xml3d.getElementByRay(new_ray, new_hitpoint, new_hitnormal);
+					// var new_intersection = new_hitpoint;
+				// } else {
+					// var new_intersection = intersect_xz_plane(new_vector, this.camera.position);
+				// }
 				
-				if (new_intersection != undefined) {
+				// if (new_intersection != undefined) {
 				
-					var dx = -this.rotateSpeed * (ev.touches[1].pageX - this.prevTouchPositions[1].x) * 2.0 * Math.PI / this.camera.width;
-					var dy = -this.rotateSpeed * (ev.touches[1].pageY - this.prevTouchPositions[1].y) * 2.0 * Math.PI / this.camera.height;
+					// var dx = -this.rotateSpeed * (ev.touches[1].pageX - this.prevTouchPositions[1].x) * 2.0 * Math.PI / this.camera.width;
+					// var dy = -this.rotateSpeed * (ev.touches[1].pageY - this.prevTouchPositions[1].y) * 2.0 * Math.PI / this.camera.height;
 
-					var mx = new window.XML3DRotation(new window.XML3DVec3(0,1,0), dx);
-					var my = new window.XML3DRotation((mx.multiply(this.camera.orientation)).rotateVec3(new window.XML3DVec3(1,0,0)), dy);
+					// var mx = new window.XML3DRotation(new window.XML3DVec3(0,1,0), dx);
+					// var my = new window.XML3DRotation((mx.multiply(this.camera.orientation)).rotateVec3(new window.XML3DVec3(1,0,0)), dy);
 					
-					var q0 = my.multiply(mx);
+					// var q0 = my.multiply(mx);
 
-					var p0 = new_intersection;
-					var tmp = q0.multiply(this.camera.orientation);
-					tmp.normalize();
-					var rotated_dir = tmp.rotateVec3(new window.XML3DVec3(0,0,1));
+					// var p0 = new_intersection;
+					// var tmp = q0.multiply(this.camera.orientation);
+					// tmp.normalize();
+					// var rotated_dir = tmp.rotateVec3(new window.XML3DVec3(0,0,1));
 					
-					if (rotated_dir.y > 0.05 && rotated_dir.y < 0.95) {
+					// if (rotated_dir.y > 0.05 && rotated_dir.y < 0.95) {
 						
-						var diff = this.camera.position.subtract(new_intersection);
-						var rotated = q0.rotateVec3(diff);
-						if (p0.add(rotated).y > 5) {
-							this.camera.orientation = tmp;
-							this.camera.position = p0.add(rotated);
-						} else {
-							rotated = mx.rotateVec3(diff);
-							this.camera.orientation = mx.multiply(this.camera.orientation);
-							this.camera.position = p0.add(rotated);
-						}
+						// var diff = this.camera.position.subtract(new_intersection);
+						// var rotated = q0.rotateVec3(diff);
+						// if (p0.add(rotated).y > 5) {
+							// this.camera.orientation = tmp;
+							// this.camera.position = p0.add(rotated);
+						// } else {
+							// rotated = mx.rotateVec3(diff);
+							// this.camera.orientation = mx.multiply(this.camera.orientation);
+							// this.camera.position = p0.add(rotated);
+						// }
 						
-					} else {
+					// } else {
 					
-						var diff = this.camera.position.subtract(new_intersection);
-						var rotated = mx.rotateVec3(diff);
-						this.camera.orientation = mx.multiply(this.camera.orientation);
-						this.camera.position = p0.add(rotated);
+						// var diff = this.camera.position.subtract(new_intersection);
+						// var rotated = mx.rotateVec3(diff);
+						// this.camera.orientation = mx.multiply(this.camera.orientation);
+						// this.camera.position = p0.add(rotated);
 					
-					}
+					// }
 				
-				}
-				break;
+				// }
+				// break;
 			
-        }
+        // }
 
-        if (this.action != this.NO_MOUSE_ACTION) {
-            var touchPositions = [];
-            for (var i=0; i<ev.touches.length; i++) {
-                touchPositions[i] = {x: ev.touches[i].pageX, y: ev.touches[i].pageY};
-            }
+        if (this.action != this.NO_ACTION) {
+            
             this.prevTouchPositions = touchPositions;
             event.returnValue = false;
         }
