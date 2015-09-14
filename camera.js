@@ -199,8 +199,31 @@
     
     XML3D.StandardCamera.prototype.NO_ACTION = null;
     
-	// TODO: generic translate with customizable plane
-    XML3D.StandardCamera.prototype.TRANSLATE = {
+    var DRAG_TRANSLATE = function (plane_normal) {
+        var normal = plane_normal !== undefined ? new XML3D.Vec3(plane_normal) : null;
+        
+        return {
+            start: function (x, y) {
+                var ray = this.xml3d.generateRay(x, y);
+                this.state.dragPoint = this.intersectScene(ray);
+                this.state.normal = normal ? normal : this.transformInterface.direction;
+            },
+            move: function (x, y, dx, dy) {
+                if (!this.state.dragPoint) return;
+                
+                var ray = this.xml3d.generateRay(x, y);
+                var hitpoint = this.intersect_ray_plane(ray, this.state.normal, this.state.dragPoint);
+                if (!hitpoint) return;
+                
+                var diff = this.state.dragPoint.subtract(hitpoint);
+                if (isNaN(XML3D.math.vec3.sqrLen(diff.data))) return;
+                
+                this.transformInterface.translate(diff);
+            }
+        };
+    };
+    
+    XML3D.StandardCamera.prototype.FIXED_TRANSLATE = {
         move: function (x, y, dx, dy) {
             var f = 2.0* Math.tan(this.transformInterface.fieldOfView/2.0) / this.height;
             dx = f*dx * this.options.zoomSpeed;
@@ -210,6 +233,11 @@
         }
     };
     
+    XML3D.StandardCamera.prototype.TRANSLATE = FIXED_TRANSLATE;
+    // XML3D.StandardCamera.prototype.TRANSLATE = DRAG_TRANSLATE();
+    
+    XML3D.StandardCamera.prototype.PANNING = DRAG_TRANSLATE([0, 1, 0]);
+    
     XML3D.StandardCamera.prototype.DOLLY = {
         move: function (x, y, dx, dy) {
             dy = this.options.zoomSpeed * dy / this.height;
@@ -217,7 +245,7 @@
         }
     };
     
-	// TODO: generic rotate with customizable axis
+    // TODO: generic rotate with customizable axis
     XML3D.StandardCamera.prototype.ROTATE = {
         start: function (x, y) {
             if (!this.options.updateExaminePoint) return;
@@ -234,8 +262,8 @@
             this.transformInterface.rotateAroundPoint(mx, this.state.examinePoint);
         }
     };
-	
-	// TODO: generic rotate with customizable axis
+    
+    // TODO: generic rotate with customizable axis
     XML3D.StandardCamera.prototype.ORBIT = {
         start: function (x, y) {
             if (!this.options.updateExaminePoint) return;
@@ -251,13 +279,13 @@
             dy = -this.options.rotateSpeed * dy * 2.0 * Math.PI / this.height;
             
             var mx = new XML3D.Quat.fromAxisAngle(this.options.upVector, dx);
-			var q0 = mx.mul(tf.orientation);
+            var q0 = mx.mul(tf.orientation);
             var my = new XML3D.Quat.fromAxisAngle(new XML3D.Vec3.fromValues(1,0,0).transformQuat(q0), dy);
             
             var q1 = my.mul(mx);
             
             var q2 = q1.mul(tf.orientation).normalize();
-			
+            
             var dir = new XML3D.Vec3.fromValues(0,0,1).transformQuat(q2);
             var diff = tf.position.subtract(this.state.examinePoint);
             var rotated = diff.transformQuat(q1);
@@ -266,7 +294,7 @@
                 rotated = diff.transformQuat(mx);
                 q2 = q0;
             }
-			
+            
             tf.position = this.state.examinePoint.add(rotated);
             tf.orientation = q2;
         }
@@ -286,26 +314,7 @@
         }
     };
     
-	// TODO: generic translate with customizable plane
-    XML3D.StandardCamera.prototype.PANNING = {
-        start: function (x, y) {
-            var ray = this.xml3d.generateRay(x, y);
-            this.state.dragPoint = this.intersectScene(ray);
-        },
-        move: function (x, y, dx, dy) {
-            if (!this.state.dragPoint) return;
-            
-            var ray = this.xml3d.generateRay(x, y);
-            var hitpoint = this.intersect_ray_plane(ray, XML3D.Vec3.fromValues(0.0, 1.0, 0.0), this.state.dragPoint);
-            if (!hitpoint) return;
-            
-            var diff = this.state.dragPoint.subtract(hitpoint);
-            if (isNaN(XML3D.math.vec3.sqrLen(diff.data))) return;
-            
-            this.transformInterface.translate(diff);
-        }
-    };
-    
+
 
     
     
