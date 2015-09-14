@@ -51,9 +51,9 @@
         this.options.rotateSpeed = opt.rotateSpeed || 1.5;
         this.options.zoomSpeed = opt.zoomSpeed || 20;
         this.options.moveSpeed = opt.moveSpeed || this.options.zoomSpeed * 0.05;
-        this.options.useKeys = opt.useKeys || false;
-        this.options.updateExaminePoint = opt.updateExaminePoint || false;
-        this.options.dragging = opt.dragging || true;
+        this.options.useKeys = opt.useKeys !== undefined ? opt.useKeys : false;
+        this.options.updateExaminePoint = opt.updateExaminePoint !== undefined ? opt.updateExaminePoint : false;
+        this.options.dragging = opt.dragging !== undefined ? opt.dragging : true;
         this.options.upVector = new XML3D.Vec3(opt.upVector || this.transformInterface.upVector);
         
         this.action = this.NO_ACTION;
@@ -250,24 +250,28 @@
             dx = -this.options.rotateSpeed * dx * 2.0 * Math.PI / this.width;
             dy = -this.options.rotateSpeed * dy * 2.0 * Math.PI / this.height;
             
-			var up = XML3D.Vec3.fromValues(0,1,0);
-            var mx = new XML3D.Quat.fromAxisAngle(up, dx);
+            var mx = new XML3D.Quat.fromAxisAngle(this.options.upVector, dx);
 			var q0 = mx.mul(tf.orientation);
-
             var my = new XML3D.Quat.fromAxisAngle(new XML3D.Vec3.fromValues(1,0,0).transformQuat(q0), dy);
             
-            var q1 = my.mul(mx).normalize();
-            // var dir = new XML3D.Vec3.fromValues(0,0,1).transformQuat(q1);
-
-            // var diff = tf.position.subtract(this.state.examinePoint);
-            // var rotated = diff.transformQuat(q1);
+            var q1 = my.mul(mx);
+            
+            var q2 = q1.mul(tf.orientation).normalize();
 			
-			tf.rotateAroundPoint(mx, this.state.examinePoint);
+            var dir = new XML3D.Vec3.fromValues(0,0,1).transformQuat(q2);
+            var diff = tf.position.subtract(this.state.examinePoint);
+            var rotated = diff.transformQuat(q1);
+            
+            if (dir.y < 0 || dir.y > 0.95) {
+                rotated = diff.transformQuat(mx);
+                q2 = q0;
+            }
 			
-            // tf.orientation = q1;
-            // tf.position = this.state.examinePoint.add(rotated);
+            tf.position = this.state.examinePoint.add(rotated);
+            tf.orientation = q2;
         }
     };
+
     
     XML3D.StandardCamera.prototype.LOOKAROUND = {
         move: function (x, y, dx, dy) {
